@@ -3,7 +3,7 @@ import json
 import requests
 import time
 from dotenv import load_dotenv
-import google.generativeai as genai
+import google.genai as genai
 from groq import Groq
 from openai import OpenAI
 from anthropic import Anthropic
@@ -32,8 +32,9 @@ GROQ_KEY = os.getenv('GROQ_API_KEY')
 
 # Inicializar clientes
 if _valid_api_key(GEMINI_KEY):
-    genai.configure(api_key=GEMINI_KEY)
+    gemini_client = genai.Client(api_key=GEMINI_KEY)
 else:
+    gemini_client = None
     print('⚠️ GEMINI_KEY não configurada ou é placeholder; Gemini será ignorado como fallback.')
 
 groq_client = Groq(api_key=GROQ_KEY) if _valid_api_key(GROQ_KEY) else None
@@ -143,15 +144,18 @@ def gerar_com_openai(prompt, model):
 
 def gerar_com_gemini(prompt):
     """Gera conteúdo com Gemini (fallback)"""
+    if not gemini_client:
+        raise Exception("Chave API Gemini não configurada")
+
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            model = genai.GenerativeModel('gemini-2.0-flash')
-            response = model.generate_content(
-                prompt,
-                generation_config={"response_mime_type": "application/json"}
+            response = gemini_client.models.generate_content(
+                model='gemini-2.0-flash',
+                contents=prompt,
+                config={'response_mime_type': 'application/json'}
             )
-            return json.loads(response.text)
+            return json.loads(response.candidates[0].content.parts[0].text)
         except Exception as e:
             error_str = str(e)
             if "429" in error_str and "quota" in error_str.lower():
@@ -176,7 +180,10 @@ def gerar_audio(roteiro):
     """Gera áudio com edge-tts"""
     try:
         print("🔄 Gerando áudio...")
-        os.system(f'edge-tts --voice pt-BR-AntonioNeural --text "{roteiro}" --write-media locucao.mp3')
+        import subprocess
+        subprocess.run([
+            'edge-tts', '--voice', 'pt-BR-AntonioNeural', '--text', roteiro, '--write-media', 'locucao.mp3'
+        ], check=True)
         if not os.path.exists('locucao.mp3'):
             raise FileNotFoundError("Arquivo de áudio não foi criado")
         print("✅ Áudio gerado com sucesso!")
@@ -193,7 +200,10 @@ def baixar_video():
             headers={"Authorization": PEXELS_KEY}
         )
         response.raise_for_status()
-        v_url = response.json()['videos'][0]['video_files'][0]['link']
+        data = response.json()
+        if not data.get('videos'):
+            raise ValueError("Nenhum vídeo encontrado no Pexels")
+        v_url = data['videos'][0]['video_files'][0]['link']
         with open('fundo.mp4', 'wb') as f:
             f.write(requests.get(v_url).content)
         if not os.path.exists('fundo.mp4'):
@@ -209,7 +219,8 @@ def editar_video():
         print("🔄 Editando vídeo...")
         v = VideoFileClip("fundo.mp4")
         a = AudioFileClip("locucao.mp3")
-        final = v.subclip(0, a.duration).set_audio(a)
+        duration = min(v.duration, a.duration)
+        final = v.subclip(0, duration).set_audio(a.subclip(0, duration))
         final.write_videofile("final.mp4", fps=24, codec="libx264", audio_codec="aac", logger=None)
         if not os.path.exists('final.mp4'):
             raise FileNotFoundError("Arquivo final não foi criado")
